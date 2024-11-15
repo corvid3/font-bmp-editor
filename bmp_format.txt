@@ -1,0 +1,5 @@
+each glyph is stored in row order,
+that is the first bit is the 1st col 1st row,
+the next bit is the 2nd col 1st row,
+the next bit is the 3rd col 1st row,
+etcetera
