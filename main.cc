@@ -371,6 +371,7 @@ struct Context
   bool m_modalError{ false };
   bool m_modalLoad{ false };
   bool m_modalSave{ false };
+  bool m_modalNew{ false };
 
   // TODO: make this a stack maybe?
   void error(std::string const& what)
@@ -539,11 +540,13 @@ main(int argc, char** argv)
 
   auto help =
     Renderer([&] {
-      return hbox({ text("F1 to exit") | border | color(Color::Red),
-                    text("F2 to save") | border | color(Color::Green),
-                    text("F3 to load") | border | color(Color::Blue),
-                    text("F4 to create") | border | color(Color::GreenYellow),
-                    text("F5 to unload") | border | color(Color::Red) });
+      return vbox(
+        { hbox({ text("F1 to exit") | border | color(Color::Red),
+                 text("F2 to save") | border | color(Color::Green),
+                 text("F3 to load") | border | color(Color::Blue) }),
+          hbox({ text("F4 to create") | border | color(Color::GreenYellow),
+                 text("F5 to unload") | border | color(Color::Red),
+                 text("F6 to change num") | border | color(Color::Green) }) });
     }) |
     center;
 
@@ -577,10 +580,11 @@ main(int argc, char** argv)
             size(ftxui::WIDTH, Constraint::GREATER_THAN, 20) | border,
           &ctx.m_modalLoad);
 
-  std::string save_input_str;
-  auto save_input =
-    Input(&save_input_str, "filepath") |
+  auto ignore_enter =
     CatchEvent([&](Event e) { return e.character()[0] == '\n'; });
+
+  std::string save_input_str;
+  auto save_input = Input(&save_input_str, "filepath") | ignore_enter;
 
   auto save_dialog =
     Modal(Container::Vertical(
@@ -606,6 +610,29 @@ main(int argc, char** argv)
                   Button("Cancel", [&] { ctx.m_modalSave = false; }) }) }) |
             size(ftxui::WIDTH, Constraint::GREATER_THAN, 20) | border,
           &ctx.m_modalSave);
+
+  std::string new_dialog_width;
+  std::string new_dialog_height;
+  auto new_dialog_width_input =
+    Input(&new_dialog_width, "width") | ignore_enter;
+  auto new_dialog_height_input =
+    Input(&new_dialog_height, "height") | ignore_enter;
+  auto new_dialog =
+    Modal(Container::Vertical(
+            { Container::Horizontal({ new_dialog_width_input | border,
+                                      new_dialog_height_input | border }),
+              Container::Horizontal(
+                { Button("OK",
+                         [&] {
+                           ctx.m_modalNew = false;
+                           ctx.m_workspace.emplace(
+                             FontData(std::stoi(new_dialog_width),
+                                      std::stoi(new_dialog_height),
+                                      256));
+                         }),
+                  Button("CANCEL", [&] { ctx.m_modalNew = false; }) }) }) |
+            border,
+          &ctx.m_modalNew);
 
   auto error_dialog =
     Modal(Container::Vertical(
@@ -654,9 +681,10 @@ main(int argc, char** argv)
           ctx.error("you must unload the current font to create another!");
         } else {
           // TODO: make a popup that lets you set the font size
-          ctx.m_workspace.emplace(Workspace(FontData(8, 8)));
+          ctx.m_modalNew = true;
         }
       }
+
       if (event == event.F5) {
         // TODO: make a popup "are you sure?" box
         if (!ctx.m_workspace) {
@@ -667,7 +695,7 @@ main(int argc, char** argv)
       }
       return false;
     }) |
-    load_dialog | save_dialog | error_dialog;
+    load_dialog | save_dialog | new_dialog | error_dialog;
 
   // it may genuinely be worth just looping every 16ms and
   // just constantly copying the data from the current
