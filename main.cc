@@ -68,7 +68,7 @@ public:
   void operator>>(O& out)
   {
     if (m_data == m_end)
-      throw std::runtime_error("ran out of end of slidebuf range\n");
+      throw std::runtime_error("ran out of end of slidebuf range | slide 1\n");
     out = *(m_data++);
   }
 
@@ -77,7 +77,7 @@ public:
   void operator>>(O& out)
   {
     if (m_data >= m_end - 1)
-      throw std::runtime_error("ran out of end of slidebuf range\n");
+      throw std::runtime_error("ran out of end of slidebuf range | slide 2\n");
     char tmpl, tmpr;
     *this >> tmpl;
     *this >> tmpr;
@@ -213,17 +213,22 @@ struct FontData
     };
 
     for (unsigned g = 0; g < num; g++) {
-      for (unsigned b = 0; b < bytes_per_glyph; b++)
-        buf >> workspace.at(b);
+      try {
+        for (unsigned b = 0; b < bytes_per_glyph; b++)
+          buf >> workspace.at(b);
 
-      std::vector<bool> glyph_data;
+        std::vector<bool> glyph_data;
 
-      for (unsigned b = 0; b < bits_per_glyph; b++) {
-        bool const bit = lookup(b);
-        glyph_data.push_back(bit);
+        for (unsigned b = 0; b < bits_per_glyph; b++) {
+          bool const bit = lookup(b);
+          glyph_data.push_back(bit);
+        }
+
+        m_data.push_back(glyph_data);
+      } catch (std::exception const& e) {
+        throw std::runtime_error(
+          std::format("{} @ letter {}", e.what(), (int)g));
       }
-
-      m_data.push_back(glyph_data);
     }
 
     // lets do a couple of sanity checks...
