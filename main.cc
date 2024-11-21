@@ -43,7 +43,7 @@ public:
   template<typename O>
   T& operator<<(O arg)
   {
-    if (m_maybe)
+    if (m_maybe != nullptr)
       *m_maybe << arg;
 
     return *m_maybe;
@@ -52,7 +52,30 @@ public:
 // acts monadically
 class LogFile
 {
+public:
+  enum class Level
+  {
+    Info,
+    Error,
+  };
+
+private:
   std::unique_ptr<std::ostream> m_stream;
+  std::optional<Level> m_currentLevel;
+  std::string_view get_level_text()
+  {
+    if (!m_currentLevel)
+      return "";
+    switch (*m_currentLevel) {
+      case Level::Info:
+        return "INFO  :: ";
+      case Level::Error:
+        return "ERROR :: ";
+    }
+
+    fprintf(stderr, "mysteriously fell out of switch in get_level_text");
+    exit(1);
+  }
 
 public:
   LogFile()
@@ -65,20 +88,44 @@ public:
   {
   }
 
+  LogFile& operator<<(Level const level)
+  {
+    m_currentLevel = level;
+    return *this;
+  }
+
   LogFile& operator<<(std::string_view what)
   {
     if (m_stream) {
       auto const zone = std::chrono::current_zone();
       auto const now = std::chrono::system_clock::now();
 
-      *m_stream << std::format("[{:%F %X}] ", zone->to_local(now)) << what
-                << std::endl;
+      *m_stream << std::format(
+                     "[{:%F %X}] {}", zone->to_local(now), get_level_text())
+                << what << std::endl;
+
+      m_currentLevel.reset();
     }
 
     return *this;
   }
 };
 
+class logged_runtime_error : public std::runtime_error
+{
+public:
+  logged_runtime_error(OStreamMaybe<LogFile>& log,
+                       std::convertible_to<std::string_view> auto const& msg)
+    : runtime_error(msg)
+  {
+    // FIXME: this causes a segfault??
+    // happens in the ostreammaybe "== nullptr" if check. what.
+    // log << LogFile::Level::Error << msg;
+  }
+};
+
+// this is a global because... why not. should probably just store
+// it in the context struct though
 OStreamMaybe<LogFile> g_logFile;
 
 // TODO: potentially add resizing...
@@ -87,14 +134,22 @@ OStreamMaybe<LogFile> g_logFile;
 std::vector<unsigned char>
 readFile(std::filesystem::path const& path)
 {
-  std::ifstream i(path);
+  std::ifstream i(path, std::ios::in | std::ios::binary);
 
   if (i.fail())
-    throw std::runtime_error(std::format(
-      "unable to open file: {} doesn't exist", path.generic_string()));
+    throw logged_runtime_error(
+      g_logFile,
+      std::format("unable to open file: {} doesn't exist",
+                  path.generic_string()));
 
-  std::istream_iterator<unsigned char> x(i);
-  std::vector<unsigned char> out(x, decltype(x)());
+  using namespace std;
+  vector<unsigned char> out;
+  copy(istreambuf_iterator<char>(i),
+       istreambuf_iterator<char>(),
+       inserter(out, out.end()));
+
+  g_logFile << std::format(
+    "FILESYSTEM: {}, VECTOR: {}", filesystem::file_size(path), out.size());
   return out;
 }
 
@@ -107,40 +162,45 @@ template<typename T>
                                  char>
 class SlideBuf
 {
-  T m_data;
+  T m_begin;
   T m_end;
 
 public:
   SlideBuf(T const& in, T const& end)
-    : m_data(in)
+    : m_begin(in)
     , m_end(end)
   {
   }
 
-  operator bool() { return m_data != m_end; }
+  operator bool() { return m_begin != m_end; }
+
+  auto len() const -> std::integral auto { return m_end - m_begin; }
 
   template<typename O>
     requires BitWidth<O, 1>
   void operator>>(O& out)
   {
-    if (m_data == m_end)
-      throw std::runtime_error("ran out of end of slidebuf range | slide 1\n");
-    out = *(m_data++);
+    if (m_begin == m_end)
+      throw std::runtime_error("ran out of end of slidebuf range | slide 1");
+
+    out = *m_begin;
+    m_begin += 1;
   }
 
   template<typename O>
     requires BitWidth<O, 2>
   void operator>>(O& out)
   {
-    if (m_data >= m_end - 1)
-      throw std::runtime_error("ran out of end of slidebuf range | slide 2\n");
+    if (m_begin + 1 >= m_end)
+      throw std::runtime_error("ran out of end of slidebuf range | slide 2");
+
     char tmpl, tmpr;
     *this >> tmpl;
     *this >> tmpr;
     out = (static_cast<O>(tmpl) << 8) | (tmpr & 0xFF);
   }
 
-  void operator>>(std::string& t)
+  void operator>>(std::convertible_to<std::string> auto& t)
   {
     char c;
     (*this) >> c;
@@ -226,16 +286,20 @@ struct FontData
       buf >> magic;
 
     if (magic != "BMP")
-      throw std::runtime_error(std::format(
-        "invalid magic at beginning of fontdata file, found: {}", magic));
+      throw logged_runtime_error(
+        g_logFile,
+        std::format("invalid magic at beginning of fontdata file, found: {}",
+                    magic));
 
     std::string version;
     for (auto i = 0; i < 3; i++)
       buf >> version;
     if (version != "000")
-      throw std::runtime_error(std::format(
-        "currently only able to decode version 000 of the spec, found: {}",
-        version));
+      throw logged_runtime_error(
+        g_logFile,
+        std::format(
+          "currently only able to decode version 000 of the spec, found: {}",
+          version));
 
     unsigned char width;
     unsigned char height;
@@ -246,14 +310,19 @@ struct FontData
     buf >> num;
 
     if (width == 0)
-      throw std::runtime_error("width is somehow 0, wtf!");
+      throw logged_runtime_error(g_logFile, "width is somehow 0, wtf!");
     if (height == 0)
-      throw std::runtime_error("height is somehow 0, wtf!");
+      throw logged_runtime_error(g_logFile, "height is somehow 0, wtf!");
     if (num == 0)
-      throw std::runtime_error("num is somehow 0, wtf!");
+      throw logged_runtime_error(g_logFile, "num is somehow 0, wtf!");
 
-    g_logFile << std::format(
-      "loading font [width: {}, height: {}, num: {}]", width, height, num);
+    g_logFile << LogFile::Level::Info
+              << std::format(
+                   "loading font [width: {}, height: {}, num: {}] bytes: {}",
+                   width,
+                   height,
+                   num,
+                   data.size());
 
     m_width = width;
     m_height = height;
@@ -272,8 +341,9 @@ struct FontData
     };
 
     for (unsigned g = 0; g < num; g++) {
+      unsigned b = 0;
       try {
-        for (unsigned b = 0; b < bytes_per_glyph; b++)
+        for (b = 0; b < bytes_per_glyph; b++)
           buf >> workspace.at(b);
 
         std::vector<bool> glyph_data;
@@ -285,17 +355,18 @@ struct FontData
 
         m_data.push_back(glyph_data);
       } catch (std::exception const& e) {
-        throw std::runtime_error(
-          std::format("{} @ letter {}", e.what(), (int)g));
+        throw logged_runtime_error(
+          g_logFile, std::format("{} @ letter {}", e.what(), (int)g));
       }
     }
 
     // lets do a couple of sanity checks...
     if (bits_per_glyph != m_data[0].size())
-      throw std::runtime_error(
+      throw logged_runtime_error(
+        g_logFile,
         "a glyph does not countain the amount of bools per bits in a glyph!");
     if (m_data.size() != num)
-      throw std::runtime_error("num of glyphs != num!");
+      throw logged_runtime_error(g_logFile, "num of glyphs != num!");
   }
 
   // TODO: actually encode the data...
@@ -418,7 +489,8 @@ public:
   void loadGlyph(unsigned const glyphNo)
   {
     if (glyphNo >= numGlyphs())
-      throw std::runtime_error("trying to load glyph outside of valid range");
+      throw logged_runtime_error(g_logFile,
+                                 "trying to load glyph outside of valid range");
 
     saveCurrentGlyph();
     m_selectedGlyph = glyphNo;
@@ -579,7 +651,8 @@ struct Arguments
           break;
 
         default:
-          throw std::runtime_error(
+          throw logged_runtime_error(
+            g_logFile,
             "unknown argument found while trying to parse launch args");
       }
     };
