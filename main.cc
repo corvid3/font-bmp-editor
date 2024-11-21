@@ -68,9 +68,11 @@ public:
   LogFile& operator<<(std::string_view what)
   {
     if (m_stream) {
+      auto const zone = std::chrono::current_zone();
       auto const now = std::chrono::system_clock::now();
 
-      *m_stream << std::format("[{:%F %X}] ", now) << what << std::endl;
+      *m_stream << std::format("[{:%F %X}] ", zone->to_local(now)) << what
+                << std::endl;
     }
 
     return *this;
