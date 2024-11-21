@@ -17,17 +17,71 @@
 #include <ftxui/screen/screen.hpp>
 #include <ftxui/screen/terminal.hpp>
 #include <functional>
+#include <ios>
 #include <iterator>
 #include <optional>
+#include <ostream>
 #include <span>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <vector>
+
+template<typename T>
+class OStreamMaybe
+{
+  std::unique_ptr<T> m_maybe;
+
+public:
+  OStreamMaybe()
+    : m_maybe(nullptr) {};
+  OStreamMaybe(T* owning)
+    : m_maybe(owning) {};
+
+  void reset(T* owning = nullptr) { m_maybe.reset(owning); }
+
+  template<typename O>
+  T& operator<<(O arg)
+  {
+    if (m_maybe)
+      *m_maybe << arg;
+
+    return *m_maybe;
+  }
+};
+// acts monadically
+class LogFile
+{
+  std::unique_ptr<std::ostream> m_stream;
+
+public:
+  LogFile()
+    : m_stream(nullptr)
+  {
+  }
+
+  LogFile(std::filesystem::path const& path)
+    : m_stream(new std::ofstream(path, std::ios_base::app | std::ios_base::out))
+  {
+  }
+
+  LogFile& operator<<(std::string_view what)
+  {
+    if (m_stream) {
+      auto const now = std::chrono::system_clock::now();
+
+      *m_stream << std::format("[{:%F %X}] ", now) << what << std::endl;
+    }
+
+    return *this;
+  }
+};
+
+OStreamMaybe<LogFile> g_logFile;
 
 // TODO: potentially add resizing...
 // but if you're going to resize
 // the font might as well completely start over lol
-
 std::vector<unsigned char>
 readFile(std::filesystem::path const& path)
 {
@@ -195,6 +249,9 @@ struct FontData
       throw std::runtime_error("height is somehow 0, wtf!");
     if (num == 0)
       throw std::runtime_error("num is somehow 0, wtf!");
+
+    g_logFile << std::format(
+      "loading font [width: {}, height: {}, num: {}]", width, height, num);
 
     m_width = width;
     m_height = height;
@@ -386,6 +443,48 @@ struct Context
   }
 };
 
+ftxui::Element
+glyphRenderer(Context& ctx)
+{
+  using namespace ftxui;
+
+  if (!ctx.m_workspace.has_value())
+    return text("no font loaded");
+
+  auto& ws = *ctx.m_workspace;
+
+  auto const height = ws.height();
+  auto const width = ws.width();
+
+  std::function<bool(int, int)> is_enabled = [&](auto const w, auto const h) {
+    return ws.getWorkingValues()[h * width + w];
+  };
+
+  std::vector<Element> lines;
+  for (unsigned h = 0; h < height; h++) {
+    std::string line;
+    for (unsigned w = 0; w < width; w++) {
+      auto const en = is_enabled(w, h);
+
+      if ((ws.m_curs.m_x == w xor ws.m_curs.m_y == h) && !en) {
+        line.append("░");
+      } else if (ws.m_curs.m_x == w && ws.m_curs.m_y == h) {
+        if (en)
+          line.append("▓");
+        else
+          line.append("X");
+      } else {
+        if (en)
+          line.append("█");
+        else
+          line.append(" ");
+      };
+    }
+    lines.push_back(text(line));
+  }
+  return select(vbox(lines));
+}
+
 ftxui::Component
 mainWorkspace(Context& ctx)
 {
@@ -451,45 +550,8 @@ mainWorkspace(Context& ctx)
 
   // █
   auto main_workspace =
-    Container::Stacked(
-      { Input() | main_event_catcher, Renderer([&] {
-          if (!ctx.m_workspace.has_value())
-            return text("no font loaded");
-
-          auto& ws = *ctx.m_workspace;
-
-          auto const height = ws.height();
-          auto const width = ws.width();
-
-          std::function<bool(int, int)> is_enabled = [&](auto const w,
-                                                         auto const h) {
-            return ws.getWorkingValues()[h * width + w];
-          };
-
-          std::vector<Element> lines;
-          for (unsigned h = 0; h < height; h++) {
-            std::string line;
-            for (unsigned w = 0; w < width; w++) {
-              auto const en = is_enabled(w, h);
-
-              if ((ws.m_curs.m_x == w xor ws.m_curs.m_y == h) && !en) {
-                line.append("░");
-              } else if (ws.m_curs.m_x == w && ws.m_curs.m_y == h) {
-                if (en)
-                  line.append("▓");
-                else
-                  line.append("X");
-              } else {
-                if (en)
-                  line.append("█");
-                else
-                  line.append(" ");
-              };
-            }
-            lines.push_back(text(line));
-          }
-          return select(vbox(lines));
-        }) }) |
+    Container::Stacked({ Input() | main_event_catcher,
+                         Renderer([&] { return glyphRenderer(ctx); }) }) |
     border | flex_shrink | center;
 
   auto main_component = Container::Vertical({ title, main_workspace });
@@ -500,15 +562,20 @@ mainWorkspace(Context& ctx)
 struct Arguments
 {
   std::optional<std::string> m_loadPath;
+  std::optional<std::string> m_logPath;
 
   Arguments(int argc, char** argv)
   {
     int c = 0;
-    while ((c = getopt(argc, argv, "F:")) != -1) {
+    while ((c = getopt(argc, argv, "F:L:")) != -1) {
       switch (c) {
         case 'F':
-          m_loadPath = optarg;
+          m_loadPath = ::optarg;
           break;
+        case 'L':
+          m_logPath = ::optarg;
+          break;
+
         default:
           throw std::runtime_error(
             "unknown argument found while trying to parse launch args");
@@ -524,18 +591,19 @@ main(int argc, char** argv)
   Arguments args(argc, argv);
 
   Context ctx;
-  ctx.m_workspace.emplace(FontData(8, 8));
 
   if (args.m_loadPath) {
-    if (!std::filesystem::exists(*args.m_loadPath))
-      throw std::runtime_error(
-        std::format("unable to open file by name: {}", *args.m_loadPath));
+    auto const& path = *args.m_loadPath;
+    ctx.m_workspace.emplace(FontData(path));
+  }
+
+  if (args.m_logPath) {
+    auto const& path = *args.m_logPath;
+    g_logFile.reset(new LogFile(path));
   }
 
   auto screen = ScreenInteractive::Fullscreen();
-
   auto exit = screen.ExitLoopClosure();
-
   auto width_component = Container::Horizontal({});
 
   auto constexpr height = 8;
@@ -701,6 +769,8 @@ main(int argc, char** argv)
       return false;
     }) |
     load_dialog | save_dialog | new_dialog | error_dialog;
+
+  g_logFile << std::format("bmp editor loaded, starting loop");
 
   // it may genuinely be worth just looping every 16ms and
   // just constantly copying the data from the current
